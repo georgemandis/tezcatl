@@ -1,8 +1,10 @@
 # tezcatl
 
-Headless web rendering from the command line, powered by native macOS WebKit.
+A lightweight CLI for rendering web pages and scraping content using native macOS WebKit.
 
-Load any URL, wait for JavaScript to render, get back the fully rendered DOM HTML. Extract data with custom JS evaluation. No headless Chrome, no Puppeteer, no downloads, no network proxies — just the system WebKit engine.
+tezcatl loads URLs through the system WKWebView, waits for JavaScript to render, and returns the fully rendered DOM or the result of custom JS evaluation. No headless Chrome, no Puppeteer, no heavy dependencies — just the WebKit engine already on your Mac.
+
+This isn't meant for production scraping pipelines or large-scale crawling. It's a good fit for small tasks, personal projects, experiments, and testing or evaluation workflows where you're already working in the macOS ecosystem and want something simple that just works.
 
 Written in Zig. Uses Apple's WKWebView via Objective-C runtime bindings.
 
