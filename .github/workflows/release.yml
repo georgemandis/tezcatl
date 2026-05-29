@@ -42,8 +42,11 @@ jobs:
         run: |
           VERSION="${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
           ARCHIVE_DIR="tezcatl-${VERSION}-${{ matrix.archive_suffix }}"
-          mkdir -p "${ARCHIVE_DIR}"
+          mkdir -p "${ARCHIVE_DIR}/completions"
           cp zig-out/bin/tezcatl "${ARCHIVE_DIR}/"
+          cp completions/tezcatl.bash "${ARCHIVE_DIR}/completions/"
+          cp completions/tezcatl.zsh "${ARCHIVE_DIR}/completions/"
+          cp completions/tezcatl.fish "${ARCHIVE_DIR}/completions/"
           tar czf "${ARCHIVE_DIR}.tar.gz" "${ARCHIVE_DIR}"
           echo "ARCHIVE=${ARCHIVE_DIR}.tar.gz" >> "$GITHUB_ENV"
 
