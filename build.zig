@@ -12,6 +12,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Cross-compilation SDK paths (e.g. -Dtarget=x86_64-macos on aarch64 host)
+    const is_native = target.query.isNativeOs() and target.query.isNativeCpu();
+    if (!is_native and target_os == .macos) {
+        const macos_sdk = b.option([]const u8, "macos-sdk", "Path to macOS SDK for cross-compilation");
+        if (macos_sdk) |sdk| {
+            webview_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+            webview_mod.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        }
+    }
+
     if (target_os == .macos) {
         webview_mod.linkSystemLibrary("objc", .{});
         webview_mod.linkFramework("Foundation", .{});
