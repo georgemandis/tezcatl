@@ -1,0 +1,70 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: ''
+            archive_suffix: macos-aarch64
+            build_flags: ''
+          - target: x86_64-macos
+            archive_suffix: macos-x86_64
+            build_flags: '-Dmacos-sdk=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build
+        run: |
+          rm -rf zig-out
+          if [ -n "${{ matrix.target }}" ]; then
+            zig build -Dtarget=${{ matrix.target }} ${{ matrix.build_flags }}
+          else
+            zig build
+          fi
+
+      - name: Package archive
+        run: |
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
+          ARCHIVE_DIR="tezcatl-${VERSION}-${{ matrix.archive_suffix }}"
+          mkdir -p "${ARCHIVE_DIR}"
+          cp zig-out/bin/tezcatl "${ARCHIVE_DIR}/"
+          tar czf "${ARCHIVE_DIR}.tar.gz" "${ARCHIVE_DIR}"
+          echo "ARCHIVE=${ARCHIVE_DIR}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tezcatl-${{ matrix.archive_suffix }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
