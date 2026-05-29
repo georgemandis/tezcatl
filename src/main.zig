@@ -29,7 +29,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  tezcatl https://spa-site.com --wait=2000
         \\  tezcatl https://example.com --eval="document.title"
         \\  tezcatl https://example.com --eval="document.querySelectorAll('a').length"
-        \\  curl -s https://example.com | lingua detect   # pipe rendered HTML
+        \\  tezcatl https://example.com | lingua detect
         \\
         \\Created by George Mandis <george@mand.is>
         \\
