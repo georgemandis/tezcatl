@@ -10,9 +10,20 @@ Written in Zig. Uses Apple's WKWebView via Objective-C runtime bindings.
 
 ## Install
 
+### Homebrew
+
 ```bash
+brew install georgemandis/tap/tezcatl
+```
+
+### From source
+
+Requires [Zig 0.16+](https://ziglang.org/download/) and macOS.
+
+```bash
+git clone https://github.com/georgemandis/tezcatl.git
+cd tezcatl
 zig build -Doptimize=ReleaseFast
-cp zig-out/bin/tezcatl /usr/local/bin/
 ```
 
 ## Usage
