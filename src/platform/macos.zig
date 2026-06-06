@@ -42,7 +42,11 @@ var nav_error: bool = false;
 var js_completed: bool = false;
 var js_result_string: ?[]const u8 = null;
 var js_error_occurred: bool = false;
+var js_error_message: ?[]const u8 = null;
 var current_run_loop: ?*anyopaque = null;
+var snapshot_completed: bool = false;
+var snapshot_error: bool = false;
+var snapshot_data: ?[]const u8 = null;
 
 // ---------------------------------------------------------------------------
 // WKNavigationDelegate callbacks
@@ -91,6 +95,21 @@ fn jsBlockInvoke(block: *JSBlockLiteral, result: ?objc.id, err: ?objc.id) callco
 
     if (err != null or result == null) {
         js_error_occurred = err != null;
+        if (err) |e| {
+            var msg_ns: ?objc.id = null;
+            const user_info = objc.msgSend(?objc.id, e, objc.sel("userInfo"), .{});
+            if (user_info) |ui| {
+                const key_ns = objc.nsString("WKJavaScriptExceptionMessage");
+                msg_ns = objc.msgSend(?objc.id, ui, objc.sel("objectForKey:"), .{key_ns});
+            }
+            const desc_ns = msg_ns orelse objc.msgSend(objc.id, e, objc.sel("localizedDescription"), .{});
+            if (objc.fromNSString(desc_ns)) |cstr| {
+                const slice = std.mem.sliceTo(cstr, 0);
+                if (std.heap.c_allocator.dupe(u8, slice)) |copy| {
+                    js_error_message = copy;
+                } else |_| {}
+            }
+        }
         js_completed = true;
         if (current_run_loop) |rl| CFRunLoopStop(rl);
         return;
@@ -262,6 +281,10 @@ fn evalJS(wk_webview: objc.id, js_code: []const u8, timeout_ms: u32) webview.Web
     js_completed = false;
     js_result_string = null;
     js_error_occurred = false;
+    if (js_error_message) |msg| {
+        std.heap.c_allocator.free(@constCast(msg));
+        js_error_message = null;
+    }
 
     // Create NSString from JS code
     const ns_js = objc.nsStringFromSlice(js_code.ptr, js_code.len) orelse
@@ -292,6 +315,89 @@ fn evalJS(wk_webview: objc.id, js_code: []const u8, timeout_ms: u32) webview.Web
     if (js_error_occurred and js_result_string == null) {
         return webview.WebViewError.JavaScriptError;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot block ABI & Callback
+// ---------------------------------------------------------------------------
+
+const SnapshotBlockLiteral = extern struct {
+    isa: *anyopaque,
+    flags: c_int,
+    reserved: c_int,
+    invoke: *const fn (*SnapshotBlockLiteral, ?objc.id, ?objc.id) callconv(.c) void,
+    descriptor: *const BlockDescriptor,
+};
+
+const snapshot_block_descriptor = BlockDescriptor{
+    .reserved = 0,
+    .size = @sizeOf(SnapshotBlockLiteral),
+};
+
+fn snapshotBlockInvoke(block: *SnapshotBlockLiteral, image: ?objc.id, err: ?objc.id) callconv(.c) void {
+    _ = block;
+
+    if (err != null or image == null) {
+        snapshot_error = true;
+        snapshot_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    }
+
+    const img = image.?;
+    const tiff_data = objc.msgSend(?objc.id, img, objc.sel("TIFFRepresentation"), .{});
+    if (tiff_data == null) {
+        snapshot_error = true;
+        snapshot_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    }
+
+    const NSBitmapImageRep = objc.getClass("NSBitmapImageRep") orelse {
+        snapshot_error = true;
+        snapshot_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    };
+    const image_rep = objc.msgSend(?objc.id, NSBitmapImageRep, objc.sel("imageRepWithData:"), .{tiff_data.?});
+    if (image_rep == null) {
+        snapshot_error = true;
+        snapshot_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    }
+
+    const png_data = objc.msgSend(?objc.id, image_rep.?, objc.sel("representationUsingType:properties:"), .{
+        @as(objc.NSUInteger, 4), // NSPNGFileType = 4
+        @as(?objc.id, null),
+    });
+    if (png_data == null) {
+        snapshot_error = true;
+        snapshot_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    }
+
+    const bytes = objc.msgSend(?[*]const u8, png_data.?, objc.sel("bytes"), .{});
+    const length = objc.msgSend(objc.NSUInteger, png_data.?, objc.sel("length"), .{});
+    if (bytes == null or length == 0) {
+        snapshot_error = true;
+        snapshot_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    }
+
+    const slice = bytes.?[0..length];
+    const copy = std.heap.c_allocator.dupe(u8, slice) catch {
+        snapshot_error = true;
+        snapshot_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    };
+
+    snapshot_data = copy;
+    snapshot_completed = true;
+    if (current_run_loop) |rl| CFRunLoopStop(rl);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,3 +441,85 @@ pub fn eval(allocator: std.mem.Allocator, url: []const u8, js: []const u8, wait_
 
     return .{ .output = output };
 }
+pub fn screenshot(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_ms: u32, full_page: bool, eval_js: ?[]const u8, settle_ms: u32) webview.WebViewError![]const u8 {
+    const s = try setup(url, timeout_ms, wait_ms);
+    defer {
+        current_run_loop = null;
+        objc.autoreleasePoolPop(s.pool);
+    }
+
+    if (eval_js) |js| {
+        try evalJS(s.wk_webview, js, timeout_ms);
+        if (js_result_string) |str| {
+            std.heap.c_allocator.free(@constCast(str));
+            js_result_string = null;
+        }
+        // Pump run loop briefly to let actions settle (e.g. dynamic layout, state transition)
+        const settle_seconds: f64 = @as(f64, @floatFromInt(settle_ms)) / 1000.0;
+        _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, settle_seconds, false);
+    }
+
+    if (full_page) {
+        // Query full document height
+        try evalJS(s.wk_webview, "Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0).toString()", timeout_ms);
+        var full_height: f64 = 720.0;
+        if (js_result_string) |str| {
+            const parsed = std.fmt.parseInt(i32, str, 10) catch null;
+            if (parsed) |h| {
+                if (h > 0) {
+                    full_height = @as(f64, @floatFromInt(h));
+                }
+            }
+            std.heap.c_allocator.free(@constCast(str));
+            js_result_string = null;
+        }
+
+        const new_frame = objc.CGRect{
+            .origin = .{ .x = -10000, .y = -10000 },
+            .size = .{ .width = 1280, .height = full_height },
+        };
+        objc.msgSend(void, s.wk_webview, objc.sel("setFrame:"), .{new_frame});
+
+        // Pump run loop briefly for layout to settle at new size
+        _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+    }
+
+    snapshot_completed = false;
+    snapshot_error = false;
+    snapshot_data = null;
+
+    var block = SnapshotBlockLiteral{
+        .isa = @ptrCast(&_NSConcreteStackBlock),
+        .flags = 0,
+        .reserved = 0,
+        .invoke = &snapshotBlockInvoke,
+        .descriptor = &snapshot_block_descriptor,
+    };
+
+    objc.msgSend(void, s.wk_webview, objc.sel("takeSnapshotWithConfiguration:completionHandler:"), .{
+        @as(?objc.id, null),
+        @as(objc.id, @ptrCast(&block)),
+    });
+
+    const timeout_seconds: f64 = @as(f64, @floatFromInt(timeout_ms)) / 1000.0;
+    _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout_seconds, false);
+
+    if (!snapshot_completed) {
+        return webview.WebViewError.Timeout;
+    }
+    if (snapshot_error or snapshot_data == null) {
+        return webview.WebViewError.JavaScriptError;
+    }
+
+    const data_c = snapshot_data.?;
+    const data = allocator.dupe(u8, data_c) catch return webview.WebViewError.OutOfMemory;
+    std.heap.c_allocator.free(@constCast(data_c));
+    snapshot_data = null;
+
+    return data;
+}
+
+pub fn getJsErrorMessage() ?[]const u8 {
+    return js_error_message;
+}
+

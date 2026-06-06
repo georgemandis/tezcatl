@@ -1,0 +1,29 @@
+<html>
+
+  <script>
+    function pop() {
+	// Create a custom overlay alert modal in the DOM
+	const modal = document.createElement('div');
+	modal.style.position = 'fixed';
+	modal.style.top = '20%';
+	modal.style.left = '50%';
+	modal.style.transform = 'translate(-50%, -50%)';
+	modal.style.padding = '20px 40px';
+	modal.style.backgroundColor = '#ffffff';
+	modal.style.color = '#000000';
+	modal.style.border = '3px solid #ff0055';
+	modal.style.boxShadow = '0px 10px 30px rgba(0,0,0,0.3)';
+	modal.style.borderRadius = '8px';
+	modal.style.fontSize = '24px';
+	modal.style.fontWeight = 'bold';
+	modal.style.zIndex = '999999';
+	modal.innerText = 'hi';
+	
+	document.body.appendChild(modal);
+    }
+    </script>
+  
+  <body>
+    <button onclick="pop();">Say hi</button>
+  </body>
+</html>
