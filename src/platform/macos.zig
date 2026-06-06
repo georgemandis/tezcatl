@@ -44,6 +44,11 @@ var js_result_string: ?[]const u8 = null;
 var js_error_occurred: bool = false;
 var current_run_loop: ?*anyopaque = null;
 
+// Screenshot state
+var snapshot_completed: bool = false;
+var snapshot_image: ?objc.id = null;
+var snapshot_error_occurred: bool = false;
+
 // ---------------------------------------------------------------------------
 // WKNavigationDelegate callbacks
 // ---------------------------------------------------------------------------
@@ -133,6 +138,28 @@ fn jsBlockInvoke(block: *JSBlockLiteral, result: ?objc.id, err: ?objc.id) callco
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot (screenshot) block callback
+// ---------------------------------------------------------------------------
+
+fn snapshotBlockInvoke(block: *JSBlockLiteral, image: ?objc.id, err: ?objc.id) callconv(.c) void {
+    _ = block;
+
+    if (err != null or image == null) {
+        snapshot_error_occurred = err != null;
+        snapshot_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    }
+
+    // Retain the image so it survives the autorelease pool drain
+    const res = image.?;
+    objc.msgSend(void, res, objc.sel("retain"), .{});
+    snapshot_image = res;
+    snapshot_completed = true;
+    if (current_run_loop) |rl| CFRunLoopStop(rl);
+}
+
+// ---------------------------------------------------------------------------
 // Delegate class registration
 // ---------------------------------------------------------------------------
 
@@ -177,9 +204,10 @@ fn ensureDelegateClass() void {
 const SetupResult = struct {
     wk_webview: objc.id,
     pool: objc.id,
+    window: ?objc.id = null,
 };
 
-fn setup(url: []const u8, timeout_ms: u32, wait_ms: u32) webview.WebViewError!SetupResult {
+fn setup(url: []const u8, timeout_ms: u32, wait_ms: u32, width: u32, height: u32, needs_window: bool) webview.WebViewError!SetupResult {
     const pool = objc.autoreleasePoolPush();
 
     // Initialize NSApplication as accessory (no Dock icon, no menu bar)
@@ -204,9 +232,31 @@ fn setup(url: []const u8, timeout_ms: u32, wait_ms: u32) webview.WebViewError!Se
     const wk_alloc = objc.msgSend(objc.id, WKWebView, objc.sel("alloc"), .{});
     const frame = objc.CGRect{
         .origin = .{ .x = -10000, .y = -10000 },
-        .size = .{ .width = 1280, .height = 720 },
+        .size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
     };
     const wk_webview = objc.msgSend(objc.id, wk_alloc, objc.sel("initWithFrame:configuration:"), .{ frame, config });
+
+    // For screenshots, WKWebView must be in a window for takeSnapshot to work
+    var window: ?objc.id = null;
+    if (needs_window) {
+        const NSWindow = objc.getClass("NSWindow") orelse
+            return webview.WebViewError.FrameworkUnavailable;
+        const win_alloc = objc.msgSend(objc.id, NSWindow, objc.sel("alloc"), .{});
+        const win_frame = objc.CGRect{
+            .origin = .{ .x = -10000, .y = -10000 },
+            .size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
+        };
+        // NSWindowStyleMaskBorderless = 0
+        // NSBackingStoreBuffered = 2
+        const win = objc.msgSend(objc.id, win_alloc, objc.sel("initWithContentRect:styleMask:backing:defer:"), .{
+            win_frame,
+            @as(objc.NSUInteger, 0),
+            @as(objc.NSUInteger, 2),
+            @as(bool, false),
+        });
+        objc.msgSend(void, win, objc.sel("setContentView:"), .{wk_webview});
+        window = win;
+    }
 
     // Set up navigation delegate
     ensureDelegateClass();
@@ -254,7 +304,7 @@ fn setup(url: []const u8, timeout_ms: u32, wait_ms: u32) webview.WebViewError!Se
         _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, wait_seconds, false);
     }
 
-    return .{ .wk_webview = wk_webview, .pool = pool };
+    return .{ .wk_webview = wk_webview, .pool = pool, .window = window };
 }
 
 fn evalJS(wk_webview: objc.id, js_code: []const u8, timeout_ms: u32) webview.WebViewError!void {
@@ -299,7 +349,7 @@ fn evalJS(wk_webview: objc.id, js_code: []const u8, timeout_ms: u32) webview.Web
 // ---------------------------------------------------------------------------
 
 pub fn render(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_ms: u32) webview.WebViewError!webview.RenderResult {
-    const s = try setup(url, timeout_ms, wait_ms);
+    const s = try setup(url, timeout_ms, wait_ms, 1280, 720, false);
     defer {
         current_run_loop = null;
         objc.autoreleasePoolPop(s.pool);
@@ -319,7 +369,7 @@ pub fn render(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeo
 }
 
 pub fn eval(allocator: std.mem.Allocator, url: []const u8, js: []const u8, wait_ms: u32, timeout_ms: u32) webview.WebViewError!webview.EvalResult {
-    const s = try setup(url, timeout_ms, wait_ms);
+    const s = try setup(url, timeout_ms, wait_ms, 1280, 720, false);
     defer {
         current_run_loop = null;
         objc.autoreleasePoolPop(s.pool);
@@ -334,4 +384,96 @@ pub fn eval(allocator: std.mem.Allocator, url: []const u8, js: []const u8, wait_
     js_result_string = null;
 
     return .{ .output = output };
+}
+
+pub fn screenshot(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_ms: u32, width: u32, height: u32, eval_js_code: ?[]const u8) webview.WebViewError!webview.ScreenshotResult {
+    const s = try setup(url, timeout_ms, wait_ms, width, height, true);
+    defer {
+        current_run_loop = null;
+        objc.autoreleasePoolPop(s.pool);
+    }
+
+    // Run optional JS before taking the screenshot
+    if (eval_js_code) |js| {
+        try evalJS(s.wk_webview, js, timeout_ms);
+        // Discard the JS result string — we only care about its side effects
+        if (js_result_string) |res| {
+            std.heap.c_allocator.free(@constCast(res));
+            js_result_string = null;
+        }
+    }
+
+    // Reset snapshot state
+    snapshot_completed = false;
+    snapshot_image = null;
+    snapshot_error_occurred = false;
+
+    // Create WKSnapshotConfiguration
+    const WKSnapshotConfiguration = objc.getClass("WKSnapshotConfiguration") orelse
+        return webview.WebViewError.ScreenshotFailed;
+    const config_alloc = objc.msgSend(objc.id, WKSnapshotConfiguration, objc.sel("alloc"), .{});
+    const config = objc.msgSend(objc.id, config_alloc, objc.sel("init"), .{});
+
+    // Set snapshot rect to full viewport
+    const rect = objc.CGRect{
+        .origin = .{ .x = 0, .y = 0 },
+        .size = .{ .width = @floatFromInt(width), .height = @floatFromInt(height) },
+    };
+    objc.msgSend(void, config, objc.sel("setRect:"), .{rect});
+
+    // Build the completion handler block (reuses JSBlockLiteral since same signature)
+    var block = JSBlockLiteral{
+        .isa = @ptrCast(&_NSConcreteStackBlock),
+        .flags = 0,
+        .reserved = 0,
+        .invoke = &snapshotBlockInvoke,
+        .descriptor = &js_block_descriptor,
+    };
+
+    // takeSnapshotWithConfiguration:completionHandler:
+    objc.msgSend(void, s.wk_webview, objc.sel("takeSnapshotWithConfiguration:completionHandler:"), .{
+        config,
+        @as(objc.id, @ptrCast(&block)),
+    });
+
+    // Pump run loop for snapshot
+    const timeout_seconds: f64 = @as(f64, @floatFromInt(timeout_ms)) / 1000.0;
+    _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout_seconds, false);
+
+    if (!snapshot_completed or snapshot_error_occurred or snapshot_image == null) {
+        return webview.WebViewError.ScreenshotFailed;
+    }
+
+    const image = snapshot_image.?;
+    defer objc.msgSend(void, image, objc.sel("release"), .{});
+
+    // Convert NSImage -> NSBitmapImageRep -> PNG NSData
+    // Get TIFFRepresentation from NSImage
+    const tiff_data = objc.msgSend(?objc.id, image, objc.sel("TIFFRepresentation"), .{}) orelse
+        return webview.WebViewError.ScreenshotFailed;
+
+    // Create NSBitmapImageRep from TIFF data
+    const NSBitmapImageRep = objc.getClass("NSBitmapImageRep") orelse
+        return webview.WebViewError.ScreenshotFailed;
+    const bitmap_rep = objc.msgSend(?objc.id, NSBitmapImageRep, objc.sel("imageRepWithData:"), .{tiff_data}) orelse
+        return webview.WebViewError.ScreenshotFailed;
+
+    // representationUsingType:properties: with NSBitmapImageFileTypePNG = 4
+    const NSDictionary = objc.getClass("NSDictionary") orelse
+        return webview.WebViewError.ScreenshotFailed;
+    const empty_dict = objc.msgSend(objc.id, NSDictionary, objc.sel("dictionary"), .{});
+    const png_data = objc.msgSend(?objc.id, bitmap_rep, objc.sel("representationUsingType:properties:"), .{
+        @as(objc.NSUInteger, 4), // NSBitmapImageFileTypePNG
+        empty_dict,
+    }) orelse return webview.WebViewError.ScreenshotFailed;
+
+    // Extract bytes from NSData
+    const length = objc.msgSend(objc.NSUInteger, png_data, objc.sel("length"), .{});
+    const bytes_ptr = objc.msgSend([*]const u8, png_data, objc.sel("bytes"), .{});
+    const bytes_slice = bytes_ptr[0..length];
+
+    // Copy to caller's allocator
+    const result = allocator.dupe(u8, bytes_slice) catch return webview.WebViewError.OutOfMemory;
+
+    return .{ .png_data = result };
 }
