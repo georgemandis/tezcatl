@@ -120,6 +120,8 @@ pub fn main(init: std.process.Init) !void {
     var eval_file: ?[]const u8 = null;
     var screenshot_mode = false;
     var screenshot_path: ?[]const u8 = null;
+    var archive_mode = false;
+    var archive_path: ?[]const u8 = null;
     var viewport_width: u32 = 1280;
     var viewport_height: u32 = 720;
     var wait_ms: u32 = 0;
@@ -142,6 +144,11 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--screenshot=")) {
             screenshot_mode = true;
             screenshot_path = arg["--screenshot=".len..];
+        } else if (std.mem.eql(u8, arg, "--archive")) {
+            archive_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--archive=")) {
+            archive_mode = true;
+            archive_path = arg["--archive=".len..];
         } else if (std.mem.startsWith(u8, arg, "--width=")) {
             viewport_width = std.fmt.parseInt(u32, arg["--width=".len..], 10) catch {
                 try stderr.interface.print("Error: invalid --width value\n", .{});
@@ -202,7 +209,46 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    if (screenshot_mode) {
+    if (archive_mode and screenshot_mode) {
+        try stderr.interface.print("Error: cannot use both --archive and --screenshot\n", .{});
+        try stderr.interface.flush();
+        std.process.exit(2);
+    }
+
+    if (archive_mode) {
+        const result = webview.archive(allocator, target_url, wait_ms, timeout_ms, eval_js) catch |err| {
+            try printError(&stderr.interface, err);
+            try stderr.interface.flush();
+            std.process.exit(1);
+        };
+        defer webview.freeArchiveResult(allocator, result);
+
+        // If no explicit path, derive one from the URL. `generated` owns that allocation
+        // and is freed on scope exit; `path` borrows either the arg or the generated slug.
+        var generated: ?[]u8 = null;
+        defer if (generated) |g| allocator.free(g);
+        const path = archive_path orelse blk: {
+            const g = archiveFilename(allocator, target_url) catch {
+                try stderr.interface.print("Error: out of memory\n", .{});
+                try stderr.interface.flush();
+                std.process.exit(1);
+            };
+            generated = g;
+            break :blk g;
+        };
+
+        std.Io.Dir.writeFile(.cwd(), init.io, .{
+            .sub_path = path,
+            .data = result.archive_data,
+        }) catch {
+            try stderr.interface.print("Error: could not write to {s}\n", .{path});
+            try stderr.interface.flush();
+            std.process.exit(1);
+        };
+        if (json_mode) {
+            try stdout.interface.print("{{\"file\":\"{s}\"}}\n", .{path});
+        }
+    } else if (screenshot_mode) {
         const result = webview.screenshot(allocator, target_url, wait_ms, timeout_ms, viewport_width, viewport_height, eval_js) catch |err| {
             try printError(&stderr.interface, err);
             try stderr.interface.flush();
@@ -276,6 +322,7 @@ fn printError(writer: *std.Io.Writer, err: webview.WebViewError) !void {
         webview.WebViewError.Timeout => "Navigation timed out",
         webview.WebViewError.OutOfMemory => "Out of memory",
         webview.WebViewError.ScreenshotFailed => "Screenshot capture failed",
+        webview.WebViewError.ArchiveFailed => "Web archive capture failed",
     };
     try writer.print("Error: {s}\n", .{msg});
 }
