@@ -1,6 +1,7 @@
 .{
     .name = .tezcatl,
     .version = "0.0.1",
+    .fingerprint = 0x1c125ba79394451,
     .minimum_zig_version = "0.16.0",
     .paths = .{""},
 }
