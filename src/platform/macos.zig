@@ -49,6 +49,11 @@ var snapshot_completed: bool = false;
 var snapshot_image: ?objc.id = null;
 var snapshot_error_occurred: bool = false;
 
+// Archive state
+var archive_completed: bool = false;
+var archive_data_obj: ?objc.id = null;
+var archive_error_occurred: bool = false;
+
 // ---------------------------------------------------------------------------
 // WKNavigationDelegate callbacks
 // ---------------------------------------------------------------------------
@@ -156,6 +161,24 @@ fn snapshotBlockInvoke(block: *JSBlockLiteral, image: ?objc.id, err: ?objc.id) c
     objc.msgSend(void, res, objc.sel("retain"), .{});
     snapshot_image = res;
     snapshot_completed = true;
+    if (current_run_loop) |rl| CFRunLoopStop(rl);
+}
+
+fn archiveBlockInvoke(block: *JSBlockLiteral, data: ?objc.id, err: ?objc.id) callconv(.c) void {
+    _ = block;
+
+    if (err != null or data == null) {
+        archive_error_occurred = err != null;
+        archive_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    }
+
+    // Retain the NSData so it survives the autorelease pool drain.
+    const res = data.?;
+    objc.msgSend(void, res, objc.sel("retain"), .{});
+    archive_data_obj = res;
+    archive_completed = true;
     if (current_run_loop) |rl| CFRunLoopStop(rl);
 }
 
@@ -476,4 +499,60 @@ pub fn screenshot(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, t
     const result = allocator.dupe(u8, bytes_slice) catch return webview.WebViewError.OutOfMemory;
 
     return .{ .png_data = result };
+}
+
+pub fn archive(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_ms: u32, eval_js_code: ?[]const u8) webview.WebViewError!webview.ArchiveResult {
+    // No window needed: createWebArchiveData works on the offscreen webview.
+    const s = try setup(url, timeout_ms, wait_ms, 1280, 720, false);
+    defer {
+        current_run_loop = null;
+        objc.autoreleasePoolPop(s.pool);
+    }
+
+    // Optional JS pre-step (side effects only; discard the result).
+    if (eval_js_code) |js| {
+        try evalJS(s.wk_webview, js, timeout_ms);
+        if (js_result_string) |res| {
+            std.heap.c_allocator.free(@constCast(res));
+            js_result_string = null;
+        }
+    }
+
+    // Reset archive state.
+    archive_completed = false;
+    archive_data_obj = null;
+    archive_error_occurred = false;
+
+    // Build the completion handler block (reuses JSBlockLiteral: same signature).
+    var block = JSBlockLiteral{
+        .isa = @ptrCast(&_NSConcreteStackBlock),
+        .flags = 0,
+        .reserved = 0,
+        .invoke = &archiveBlockInvoke,
+        .descriptor = &js_block_descriptor,
+    };
+
+    // createWebArchiveDataWithCompletionHandler:
+    objc.msgSend(void, s.wk_webview, objc.sel("createWebArchiveDataWithCompletionHandler:"), .{
+        @as(objc.id, @ptrCast(&block)),
+    });
+
+    // Pump the run loop for the async archive call.
+    const timeout_seconds: f64 = @as(f64, @floatFromInt(timeout_ms)) / 1000.0;
+    _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout_seconds, false);
+
+    if (!archive_completed or archive_error_occurred or archive_data_obj == null) {
+        return webview.WebViewError.ArchiveFailed;
+    }
+
+    const data_obj = archive_data_obj.?;
+    defer objc.msgSend(void, data_obj, objc.sel("release"), .{});
+
+    // Extract bytes from NSData.
+    const length = objc.msgSend(objc.NSUInteger, data_obj, objc.sel("length"), .{});
+    const bytes_ptr = objc.msgSend([*]const u8, data_obj, objc.sel("bytes"), .{});
+    const bytes_slice = bytes_ptr[0..length];
+
+    const result = allocator.dupe(u8, bytes_slice) catch return webview.WebViewError.OutOfMemory;
+    return .{ .archive_data = result };
 }
