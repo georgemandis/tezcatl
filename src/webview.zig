@@ -15,6 +15,7 @@ pub const WebViewError = error{
     Timeout,
     OutOfMemory,
     ScreenshotFailed,
+    ArchiveFailed,
 };
 
 pub const RenderResult = struct {
@@ -27,6 +28,10 @@ pub const EvalResult = struct {
 
 pub const ScreenshotResult = struct {
     png_data: []const u8,
+};
+
+pub const ArchiveResult = struct {
+    archive_data: []const u8,
 };
 
 /// Load a URL in a headless WKWebView and return the rendered DOM HTML.
@@ -45,6 +50,12 @@ pub fn screenshot(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, t
     return platform.screenshot(allocator, url, wait_ms, timeout_ms, width, height, eval_js);
 }
 
+/// Load a URL and capture it as a Safari .webarchive, returning the archive bytes.
+/// If eval_js is provided, it is executed before the archive is captured.
+pub fn archive(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_ms: u32, eval_js: ?[]const u8) WebViewError!ArchiveResult {
+    return platform.archive(allocator, url, wait_ms, timeout_ms, eval_js);
+}
+
 pub fn freeRenderResult(allocator: std.mem.Allocator, result: RenderResult) void {
     allocator.free(result.html);
 }
@@ -55,4 +66,8 @@ pub fn freeEvalResult(allocator: std.mem.Allocator, result: EvalResult) void {
 
 pub fn freeScreenshotResult(allocator: std.mem.Allocator, result: ScreenshotResult) void {
     allocator.free(result.png_data);
+}
+
+pub fn freeArchiveResult(allocator: std.mem.Allocator, result: ArchiveResult) void {
+    allocator.free(result.archive_data);
 }
