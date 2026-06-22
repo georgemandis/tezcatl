@@ -58,6 +58,47 @@ fn writeJsonString(writer: *std.Io.Writer, s: []const u8) !void {
     }
 }
 
+fn archiveFilename(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+    // Strip a leading scheme.
+    var body = url;
+    if (std.mem.startsWith(u8, body, "https://")) {
+        body = body["https://".len..];
+    } else if (std.mem.startsWith(u8, body, "http://")) {
+        body = body["http://".len..];
+    }
+
+    // The slug is never longer than the input, so one allocation of body.len suffices.
+    // Zig 0.16: std.ArrayList is unmanaged; we avoid it and write into a fixed buffer.
+    const scratch = try allocator.alloc(u8, body.len);
+    defer allocator.free(scratch);
+
+    var len: usize = 0;
+    var last_was_us = false;
+    for (body) |c| {
+        const safe = (c >= 'A' and c <= 'Z') or
+            (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or
+            c == '.' or c == '-' or c == '_';
+        if (safe) {
+            scratch[len] = c;
+            len += 1;
+            last_was_us = false;
+        } else if (!last_was_us) {
+            scratch[len] = '_';
+            len += 1;
+            last_was_us = true;
+        }
+    }
+
+    // Trim leading/trailing underscores.
+    var slug = scratch[0..len];
+    while (slug.len > 0 and slug[0] == '_') slug = slug[1..];
+    while (slug.len > 0 and slug[slug.len - 1] == '_') slug = slug[0 .. slug.len - 1];
+
+    const base = if (slug.len == 0) "archive" else slug;
+    return std.fmt.allocPrint(allocator, "{s}.webarchive", .{base});
+}
+
 pub fn main(init: std.process.Init) !void {
     const stdout_file = std.Io.File.stdout();
     var stdout_buf: [4096]u8 = undefined;
@@ -237,4 +278,46 @@ fn printError(writer: *std.Io.Writer, err: webview.WebViewError) !void {
         webview.WebViewError.ScreenshotFailed => "Screenshot capture failed",
     };
     try writer.print("Error: {s}\n", .{msg});
+}
+
+test "archiveFilename: plain host" {
+    const a = std.testing.allocator;
+    const out = try archiveFilename(a, "https://example.com");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("example.com.webarchive", out);
+}
+
+test "archiveFilename: host and path with query" {
+    const a = std.testing.allocator;
+    const out = try archiveFilename(a, "https://example.com/blog/post?id=42");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("example.com_blog_post_id_42.webarchive", out);
+}
+
+test "archiveFilename: trailing slash trimmed" {
+    const a = std.testing.allocator;
+    const out = try archiveFilename(a, "https://example.com/path/");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("example.com_path.webarchive", out);
+}
+
+test "archiveFilename: http scheme stripped" {
+    const a = std.testing.allocator;
+    const out = try archiveFilename(a, "http://example.com");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("example.com.webarchive", out);
+}
+
+test "archiveFilename: ip and port" {
+    const a = std.testing.allocator;
+    const out = try archiveFilename(a, "http://127.0.0.1:8080/x");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("127.0.0.1_8080_x.webarchive", out);
+}
+
+test "archiveFilename: no scheme" {
+    const a = std.testing.allocator;
+    const out = try archiveFilename(a, "example.com/a");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("example.com_a.webarchive", out);
 }
