@@ -54,6 +54,11 @@ var archive_completed: bool = false;
 var archive_data_obj: ?objc.id = null;
 var archive_error_occurred: bool = false;
 
+// PDF state
+var pdf_completed: bool = false;
+var pdf_data_obj: ?objc.id = null;
+var pdf_error_occurred: bool = false;
+
 // ---------------------------------------------------------------------------
 // WKNavigationDelegate callbacks
 // ---------------------------------------------------------------------------
@@ -179,6 +184,24 @@ fn archiveBlockInvoke(block: *JSBlockLiteral, data: ?objc.id, err: ?objc.id) cal
     objc.msgSend(void, res, objc.sel("retain"), .{});
     archive_data_obj = res;
     archive_completed = true;
+    if (current_run_loop) |rl| CFRunLoopStop(rl);
+}
+
+fn pdfBlockInvoke(block: *JSBlockLiteral, data: ?objc.id, err: ?objc.id) callconv(.c) void {
+    _ = block;
+
+    if (err != null or data == null) {
+        pdf_error_occurred = err != null;
+        pdf_completed = true;
+        if (current_run_loop) |rl| CFRunLoopStop(rl);
+        return;
+    }
+
+    // Retain the NSData so it survives the autorelease pool drain.
+    const res = data.?;
+    objc.msgSend(void, res, objc.sel("retain"), .{});
+    pdf_data_obj = res;
+    pdf_completed = true;
     if (current_run_loop) |rl| CFRunLoopStop(rl);
 }
 
@@ -555,4 +578,67 @@ pub fn archive(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, time
 
     const result = allocator.dupe(u8, bytes_slice) catch return webview.WebViewError.OutOfMemory;
     return .{ .archive_data = result };
+}
+
+pub fn pdf(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_ms: u32, eval_js_code: ?[]const u8) webview.WebViewError!webview.PdfResult {
+    // No window needed: createPDF works on the offscreen webview.
+    const s = try setup(url, timeout_ms, wait_ms, 1280, 720, false);
+    defer {
+        current_run_loop = null;
+        objc.autoreleasePoolPop(s.pool);
+    }
+
+    // Optional JS pre-step (side effects only; discard the result).
+    if (eval_js_code) |js| {
+        try evalJS(s.wk_webview, js, timeout_ms);
+        if (js_result_string) |res| {
+            std.heap.c_allocator.free(@constCast(res));
+            js_result_string = null;
+        }
+    }
+
+    // Reset PDF state.
+    pdf_completed = false;
+    pdf_data_obj = null;
+    pdf_error_occurred = false;
+
+    // Build a default WKPDFConfiguration (no rect set = whole page).
+    const WKPDFConfiguration = objc.getClass("WKPDFConfiguration") orelse
+        return webview.WebViewError.PdfFailed;
+    const cfg_alloc = objc.msgSend(objc.id, WKPDFConfiguration, objc.sel("alloc"), .{});
+    const config = objc.msgSend(objc.id, cfg_alloc, objc.sel("init"), .{});
+
+    // Build the completion handler block (reuses JSBlockLiteral: same signature).
+    var block = JSBlockLiteral{
+        .isa = @ptrCast(&_NSConcreteStackBlock),
+        .flags = 0,
+        .reserved = 0,
+        .invoke = &pdfBlockInvoke,
+        .descriptor = &js_block_descriptor,
+    };
+
+    // createPDFWithConfiguration:completionHandler:
+    objc.msgSend(void, s.wk_webview, objc.sel("createPDFWithConfiguration:completionHandler:"), .{
+        config,
+        @as(objc.id, @ptrCast(&block)),
+    });
+
+    // Pump the run loop for the async PDF call.
+    const timeout_seconds: f64 = @as(f64, @floatFromInt(timeout_ms)) / 1000.0;
+    _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout_seconds, false);
+
+    if (!pdf_completed or pdf_error_occurred or pdf_data_obj == null) {
+        return webview.WebViewError.PdfFailed;
+    }
+
+    const data_obj = pdf_data_obj.?;
+    defer objc.msgSend(void, data_obj, objc.sel("release"), .{});
+
+    // Extract bytes from NSData.
+    const length = objc.msgSend(objc.NSUInteger, data_obj, objc.sel("length"), .{});
+    const bytes_ptr = objc.msgSend([*]const u8, data_obj, objc.sel("bytes"), .{});
+    const bytes_slice = bytes_ptr[0..length];
+
+    const result = allocator.dupe(u8, bytes_slice) catch return webview.WebViewError.OutOfMemory;
+    return .{ .pdf_data = result };
 }
