@@ -16,6 +16,7 @@ pub const WebViewError = error{
     OutOfMemory,
     ScreenshotFailed,
     ArchiveFailed,
+    PdfFailed,
 };
 
 pub const RenderResult = struct {
@@ -32,6 +33,10 @@ pub const ScreenshotResult = struct {
 
 pub const ArchiveResult = struct {
     archive_data: []const u8,
+};
+
+pub const PdfResult = struct {
+    pdf_data: []const u8,
 };
 
 /// Load a URL in a headless WKWebView and return the rendered DOM HTML.
@@ -56,6 +61,12 @@ pub fn archive(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, time
     return platform.archive(allocator, url, wait_ms, timeout_ms, eval_js);
 }
 
+/// Load a URL and capture it as a PDF, returning the PDF bytes.
+/// If eval_js is provided, it is executed before the PDF is captured.
+pub fn pdf(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_ms: u32, eval_js: ?[]const u8) WebViewError!PdfResult {
+    return platform.pdf(allocator, url, wait_ms, timeout_ms, eval_js);
+}
+
 pub fn freeRenderResult(allocator: std.mem.Allocator, result: RenderResult) void {
     allocator.free(result.html);
 }
@@ -70,4 +81,8 @@ pub fn freeScreenshotResult(allocator: std.mem.Allocator, result: ScreenshotResu
 
 pub fn freeArchiveResult(allocator: std.mem.Allocator, result: ArchiveResult) void {
     allocator.free(result.archive_data);
+}
+
+pub fn freePdfResult(allocator: std.mem.Allocator, result: PdfResult) void {
+    allocator.free(result.pdf_data);
 }
