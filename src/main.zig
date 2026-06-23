@@ -102,6 +102,46 @@ fn defaultFilename(allocator: std.mem.Allocator, url: []const u8, ext: []const u
     return std.fmt.allocPrint(allocator, "{s}.{s}", .{ base, ext });
 }
 
+/// Write a binary blob to an explicit path or a URL-derived default filename.
+/// Used by --archive and --pdf (NOT --screenshot, which streams to stdout when no path).
+fn writeBlobOutput(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    data: []const u8,
+    explicit_path: ?[]const u8,
+    url: []const u8,
+    ext: []const u8,
+    json_mode: bool,
+) !void {
+    // If no explicit path, derive one from the URL. `generated` owns that allocation
+    // and is freed on scope exit; `path` borrows either the arg or the generated slug.
+    var generated: ?[]u8 = null;
+    defer if (generated) |g| allocator.free(g);
+    const path = explicit_path orelse blk: {
+        const g = defaultFilename(allocator, url, ext) catch {
+            try stderr.print("Error: out of memory\n", .{});
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        generated = g;
+        break :blk g;
+    };
+
+    std.Io.Dir.writeFile(.cwd(), init.io, .{
+        .sub_path = path,
+        .data = data,
+    }) catch {
+        try stderr.print("Error: could not write to {s}\n", .{path});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    if (json_mode) {
+        try stdout.print("{{\"file\":\"{s}\"}}\n", .{path});
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const stdout_file = std.Io.File.stdout();
     var stdout_buf: [4096]u8 = undefined;
@@ -226,31 +266,7 @@ pub fn main(init: std.process.Init) !void {
         };
         defer webview.freeArchiveResult(allocator, result);
 
-        // If no explicit path, derive one from the URL. `generated` owns that allocation
-        // and is freed on scope exit; `path` borrows either the arg or the generated slug.
-        var generated: ?[]u8 = null;
-        defer if (generated) |g| allocator.free(g);
-        const path = archive_path orelse blk: {
-            const g = defaultFilename(allocator, target_url, "webarchive") catch {
-                try stderr.interface.print("Error: out of memory\n", .{});
-                try stderr.interface.flush();
-                std.process.exit(1);
-            };
-            generated = g;
-            break :blk g;
-        };
-
-        std.Io.Dir.writeFile(.cwd(), init.io, .{
-            .sub_path = path,
-            .data = result.archive_data,
-        }) catch {
-            try stderr.interface.print("Error: could not write to {s}\n", .{path});
-            try stderr.interface.flush();
-            std.process.exit(1);
-        };
-        if (json_mode) {
-            try stdout.interface.print("{{\"file\":\"{s}\"}}\n", .{path});
-        }
+        try writeBlobOutput(init, allocator, &stdout.interface, &stderr.interface, result.archive_data, archive_path, target_url, "webarchive", json_mode);
     } else if (screenshot_mode) {
         const result = webview.screenshot(allocator, target_url, wait_ms, timeout_ms, viewport_width, viewport_height, eval_js) catch |err| {
             try printError(&stderr.interface, err);
