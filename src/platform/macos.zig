@@ -459,6 +459,7 @@ pub fn screenshot(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, t
         return webview.WebViewError.ScreenshotFailed;
     const config_alloc = objc.msgSend(objc.id, WKSnapshotConfiguration, objc.sel("alloc"), .{});
     const config = objc.msgSend(objc.id, config_alloc, objc.sel("init"), .{});
+    defer objc.msgSend(void, config, objc.sel("release"), .{});
 
     // Set snapshot rect to full viewport
     const rect = objc.CGRect{
@@ -607,6 +608,7 @@ pub fn pdf(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_
         return webview.WebViewError.PdfFailed;
     const cfg_alloc = objc.msgSend(objc.id, WKPDFConfiguration, objc.sel("alloc"), .{});
     const config = objc.msgSend(objc.id, cfg_alloc, objc.sel("init"), .{});
+    defer objc.msgSend(void, config, objc.sel("release"), .{});
 
     // Build the completion handler block (reuses JSBlockLiteral: same signature).
     var block = JSBlockLiteral{
