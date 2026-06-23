@@ -165,6 +165,8 @@ pub fn main(init: std.process.Init) !void {
     var screenshot_path: ?[]const u8 = null;
     var archive_mode = false;
     var archive_path: ?[]const u8 = null;
+    var pdf_mode = false;
+    var pdf_path: ?[]const u8 = null;
     var viewport_width: u32 = 1280;
     var viewport_height: u32 = 720;
     var wait_ms: u32 = 0;
@@ -192,6 +194,11 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--archive=")) {
             archive_mode = true;
             archive_path = arg["--archive=".len..];
+        } else if (std.mem.eql(u8, arg, "--pdf")) {
+            pdf_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--pdf=")) {
+            pdf_mode = true;
+            pdf_path = arg["--pdf=".len..];
         } else if (std.mem.startsWith(u8, arg, "--width=")) {
             viewport_width = std.fmt.parseInt(u32, arg["--width=".len..], 10) catch {
                 try stderr.interface.print("Error: invalid --width value\n", .{});
@@ -252,13 +259,25 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    if (archive_mode and screenshot_mode) {
-        try stderr.interface.print("Error: cannot use both --archive and --screenshot\n", .{});
+    const output_modes = @as(u8, @intFromBool(screenshot_mode)) +
+        @as(u8, @intFromBool(archive_mode)) +
+        @as(u8, @intFromBool(pdf_mode));
+    if (output_modes > 1) {
+        try stderr.interface.print("Error: --screenshot, --archive, and --pdf are mutually exclusive\n", .{});
         try stderr.interface.flush();
         std.process.exit(2);
     }
 
-    if (archive_mode) {
+    if (pdf_mode) {
+        const result = webview.pdf(allocator, target_url, wait_ms, timeout_ms, eval_js) catch |err| {
+            try printError(&stderr.interface, err);
+            try stderr.interface.flush();
+            std.process.exit(1);
+        };
+        defer webview.freePdfResult(allocator, result);
+
+        try writeBlobOutput(init, allocator, &stdout.interface, &stderr.interface, result.pdf_data, pdf_path, target_url, "pdf", json_mode);
+    } else if (archive_mode) {
         const result = webview.archive(allocator, target_url, wait_ms, timeout_ms, eval_js) catch |err| {
             try printError(&stderr.interface, err);
             try stderr.interface.flush();
@@ -342,6 +361,7 @@ fn printError(writer: *std.Io.Writer, err: webview.WebViewError) !void {
         webview.WebViewError.OutOfMemory => "Out of memory",
         webview.WebViewError.ScreenshotFailed => "Screenshot capture failed",
         webview.WebViewError.ArchiveFailed => "Web archive capture failed",
+        webview.WebViewError.PdfFailed => "PDF capture failed",
     };
     try writer.print("Error: {s}\n", .{msg});
 }
