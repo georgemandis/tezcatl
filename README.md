@@ -74,6 +74,21 @@ $ tezcatl https://spa-site.com --wait=2000 --archive=app.webarchive
 The `.webarchive` format is a binary property list that bundles the page and its
 subresources, openable in Safari. Requires macOS 11.0+.
 
+### Save a PDF
+
+```bash
+$ tezcatl https://example.com --pdf
+# writes example.com.pdf
+
+$ tezcatl https://example.com --pdf=page.pdf
+# writes to an explicit path
+
+$ tezcatl https://spa-site.com --wait=2000 --pdf=app.pdf
+# wait for JS to render, then export PDF
+```
+
+Renders the whole page to a PDF via WebKit. Requires macOS 11.0+.
+
 ## Composability
 
 tezcatl reads URLs as arguments and writes to stdout, so it pipes naturally with other tools:
@@ -101,6 +116,7 @@ tezcatl <url> [options]
   --eval-file=FILE     Evaluate JavaScript from a file
   --screenshot[=FILE]  Take a PNG screenshot (default: stdout)
   --archive[=FILE]     Save the page as a self-contained Safari .webarchive
+  --pdf[=FILE]         Save the page as a PDF
   --width=PX           Viewport width in pixels (default: 1280)
   --height=PX          Viewport height in pixels (default: 720)
   --wait=MS            Wait N ms after page load for JS to settle (default: 0)

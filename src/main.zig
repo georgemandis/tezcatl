@@ -21,6 +21,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  --eval-file=FILE     Evaluate JavaScript from a file
         \\  --screenshot[=FILE]  Take a PNG screenshot (default: stdout)
         \\  --archive[=FILE]     Save the page as a Safari .webarchive
+        \\  --pdf[=FILE]         Save the page as a PDF
         \\  --width=PX           Viewport width in pixels (default: 1280)
         \\  --height=PX          Viewport height in pixels (default: 720)
         \\  --wait=MS            Wait N ms after page load for JS to settle (default: 0)
@@ -40,6 +41,8 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  tezcatl https://example.com --eval-file=scrape.js
         \\  tezcatl https://example.com --archive
         \\  tezcatl https://example.com --archive=page.webarchive
+        \\  tezcatl https://example.com --pdf
+        \\  tezcatl https://example.com --pdf=page.pdf
         \\  tezcatl https://example.com | lingua detect
         \\
         \\Created by George Mandis <george@mand.is>

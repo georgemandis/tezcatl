@@ -9,6 +9,7 @@ _tezcatl() {
         '--width=[Viewport width in pixels]:pixels:' \
         '--height=[Viewport height in pixels]:pixels:' \
         '--archive=[Save page as a .webarchive]:file:_files' \
+        '--pdf=[Save page as a PDF]:file:_files' \
         '--wait=[Wait ms after page load]:milliseconds:' \
         '--timeout=[Navigation timeout in ms]:milliseconds:' \
         '--json[Wrap output in JSON]' \

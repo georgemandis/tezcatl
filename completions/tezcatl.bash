@@ -3,7 +3,7 @@ _tezcatl() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
 
-    opts="--eval= --eval-file= --screenshot --width= --height= --archive --wait= --timeout= --json --help --version"
+    opts="--eval= --eval-file= --screenshot --width= --height= --archive --pdf --wait= --timeout= --json --help --version"
 
     if [[ "${cur}" == -* ]]; then
         COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
