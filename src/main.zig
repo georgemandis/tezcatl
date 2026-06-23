@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const webview = @import("webview");
 
-const version = "0.2.0";
+const version = "0.3.0";
 
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.print(
