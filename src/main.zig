@@ -61,7 +61,7 @@ fn writeJsonString(writer: *std.Io.Writer, s: []const u8) !void {
     }
 }
 
-fn archiveFilename(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+fn defaultFilename(allocator: std.mem.Allocator, url: []const u8, ext: []const u8) ![]u8 {
     // Strip a leading scheme.
     var body = url;
     if (std.mem.startsWith(u8, body, "https://")) {
@@ -99,7 +99,7 @@ fn archiveFilename(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     while (slug.len > 0 and slug[slug.len - 1] == '_') slug = slug[0 .. slug.len - 1];
 
     const base = if (slug.len == 0) "archive" else slug;
-    return std.fmt.allocPrint(allocator, "{s}.webarchive", .{base});
+    return std.fmt.allocPrint(allocator, "{s}.{s}", .{ base, ext });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -231,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
         var generated: ?[]u8 = null;
         defer if (generated) |g| allocator.free(g);
         const path = archive_path orelse blk: {
-            const g = archiveFilename(allocator, target_url) catch {
+            const g = defaultFilename(allocator, target_url, "webarchive") catch {
                 try stderr.interface.print("Error: out of memory\n", .{});
                 try stderr.interface.flush();
                 std.process.exit(1);
@@ -330,44 +330,51 @@ fn printError(writer: *std.Io.Writer, err: webview.WebViewError) !void {
     try writer.print("Error: {s}\n", .{msg});
 }
 
-test "archiveFilename: plain host" {
+test "defaultFilename: plain host webarchive" {
     const a = std.testing.allocator;
-    const out = try archiveFilename(a, "https://example.com");
+    const out = try defaultFilename(a, "https://example.com", "webarchive");
     defer a.free(out);
     try std.testing.expectEqualStrings("example.com.webarchive", out);
 }
 
-test "archiveFilename: host and path with query" {
+test "defaultFilename: host and path with query" {
     const a = std.testing.allocator;
-    const out = try archiveFilename(a, "https://example.com/blog/post?id=42");
+    const out = try defaultFilename(a, "https://example.com/blog/post?id=42", "webarchive");
     defer a.free(out);
     try std.testing.expectEqualStrings("example.com_blog_post_id_42.webarchive", out);
 }
 
-test "archiveFilename: trailing slash trimmed" {
+test "defaultFilename: trailing slash trimmed" {
     const a = std.testing.allocator;
-    const out = try archiveFilename(a, "https://example.com/path/");
+    const out = try defaultFilename(a, "https://example.com/path/", "webarchive");
     defer a.free(out);
     try std.testing.expectEqualStrings("example.com_path.webarchive", out);
 }
 
-test "archiveFilename: http scheme stripped" {
+test "defaultFilename: http scheme stripped" {
     const a = std.testing.allocator;
-    const out = try archiveFilename(a, "http://example.com");
+    const out = try defaultFilename(a, "http://example.com", "webarchive");
     defer a.free(out);
     try std.testing.expectEqualStrings("example.com.webarchive", out);
 }
 
-test "archiveFilename: ip and port" {
+test "defaultFilename: ip and port" {
     const a = std.testing.allocator;
-    const out = try archiveFilename(a, "http://127.0.0.1:8080/x");
+    const out = try defaultFilename(a, "http://127.0.0.1:8080/x", "webarchive");
     defer a.free(out);
     try std.testing.expectEqualStrings("127.0.0.1_8080_x.webarchive", out);
 }
 
-test "archiveFilename: no scheme" {
+test "defaultFilename: no scheme" {
     const a = std.testing.allocator;
-    const out = try archiveFilename(a, "example.com/a");
+    const out = try defaultFilename(a, "example.com/a", "webarchive");
     defer a.free(out);
     try std.testing.expectEqualStrings("example.com_a.webarchive", out);
+}
+
+test "defaultFilename: pdf extension" {
+    const a = std.testing.allocator;
+    const out = try defaultFilename(a, "https://example.com/report", "pdf");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("example.com_report.pdf", out);
 }
