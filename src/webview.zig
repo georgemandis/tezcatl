@@ -1,11 +1,13 @@
 // Cross-platform dispatch layer for headless web rendering.
-// Currently macOS-only (WKWebView via ObjC runtime bindings).
+//   - macOS: WKWebView via ObjC runtime bindings (platform/macos.zig)
+//   - Linux: WebKitGTK 6.0 via GObject C bindings (platform/linux.zig, experimental)
 
 const std = @import("std");
 
 const platform = switch (@import("builtin").os.tag) {
     .macos => @import("platform/macos.zig"),
-    else => @compileError("tezcatl: unsupported platform (macOS only)"),
+    .linux => @import("platform/linux.zig"),
+    else => @compileError("tezcatl: unsupported platform (macOS and Linux only)"),
 };
 
 pub const WebViewError = error{

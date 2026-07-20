@@ -126,9 +126,35 @@ tezcatl <url> [options]
   --version, -v        Show version
 ```
 
+## Linux (experimental)
+
+An experimental Linux backend is included, built on **WebKitGTK 6.0** — the
+same WebKit engine, no headless Chrome, no Puppeteer, no Node. It implements
+the two core paths (`render` and `--eval`); `--screenshot`, `--archive`, and
+`--pdf` are not yet ported.
+
+> **Status:** unverified. The backend compiles conceptually against WebKitGTK
+> but has not yet been built/run on a real machine — expect to iterate.
+
+```bash
+# Debian/Ubuntu deps
+sudo apt install libwebkitgtk-6.0-dev xvfb
+
+zig build -Doptimize=ReleaseFast
+
+# WebKitGTK wants a display, so run headless under Xvfb:
+xvfb-run -a ./zig-out/bin/tezcatl https://example.com
+xvfb-run -a ./zig-out/bin/tezcatl https://spa-site.com --wait=2000 --eval="document.title"
+```
+
+A future [WPE WebKit](https://webkit.org/wpe/) backend
+(`wpe-display-headless`) would drop the Xvfb requirement entirely — it renders
+with no X or Wayland server, a better fit for containers and CI. The load and
+`evaluate_javascript` calls are identical; only the display/view setup differs.
+
 ## Requirements
 
-- macOS 11.0+ (Big Sur or later)
+- macOS 11.0+ (Big Sur or later), or Linux with WebKitGTK 6.0 (experimental)
 - Zig 0.16+
 
 ## How It Works

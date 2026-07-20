@@ -28,6 +28,16 @@ pub fn build(b: *std.Build) void {
         webview_mod.linkFramework("WebKit", .{});
         webview_mod.linkFramework("AppKit", .{});
         webview_mod.linkFramework("CoreGraphics", .{});
+    } else if (target_os == .linux) {
+        // WebKitGTK 6.0 (GTK4). Resolved via pkg-config; requires the -dev
+        // packages: libwebkitgtk-6.0-dev (pulls in gtk4, glib, jsc).
+        // Experimental backend — see src/platform/linux.zig.
+        webview_mod.link_libc = true;
+        webview_mod.linkSystemLibrary("webkitgtk-6.0", .{});
+        webview_mod.linkSystemLibrary("gtk4", .{});
+        webview_mod.linkSystemLibrary("glib-2.0", .{});
+        webview_mod.linkSystemLibrary("gobject-2.0", .{});
+        webview_mod.linkSystemLibrary("javascriptcoregtk-6.0", .{});
     }
 
     // CLI executable
