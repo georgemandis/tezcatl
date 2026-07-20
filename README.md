@@ -128,29 +128,49 @@ tezcatl <url> [options]
 
 ## Linux (experimental)
 
-An experimental Linux backend is included, built on **WebKitGTK 6.0** — the
+An experimental Linux backend is included, built on WebKit's GLib API — the
 same WebKit engine, no headless Chrome, no Puppeteer, no Node. It implements
 the two core paths (`render` and `--eval`); `--screenshot`, `--archive`, and
 `--pdf` are not yet ported.
 
-> **Status:** unverified. The backend compiles conceptually against WebKitGTK
-> but has not yet been built/run on a real machine — expect to iterate.
+Two display backends are selectable at build time:
+
+| Build | Engine | Headless story |
+|---|---|---|
+| `-Dwpe=true` (**default**) | [WPE WebKit](https://webkit.org/wpe/) + WPEPlatform | **True headless** — no X, no Wayland, no Xvfb |
+| `-Dwpe=false` | WebKitGTK 6.0 (GTK4) | Needs a display — run under `xvfb-run` |
+
+> **Status:** unverified. The code compiles conceptually against WebKit's GLib
+> API but has not yet been built/run on a real machine — expect to iterate,
+> especially on exact WPE pkg-config module names per distro/version.
+
+### WPE headless (default)
 
 ```bash
-# Debian/Ubuntu deps
-sudo apt install libwebkitgtk-6.0-dev xvfb
+# Debian/Ubuntu deps (package names vary by release)
+sudo apt install libwpewebkit-2.0-dev
 
 zig build -Doptimize=ReleaseFast
 
-# WebKitGTK wants a display, so run headless under Xvfb:
-xvfb-run -a ./zig-out/bin/tezcatl https://example.com
-xvfb-run -a ./zig-out/bin/tezcatl https://spa-site.com --wait=2000 --eval="document.title"
+# No display needed:
+./zig-out/bin/tezcatl https://example.com
+./zig-out/bin/tezcatl https://spa-site.com --wait=2000 --eval="document.title"
 ```
 
-A future [WPE WebKit](https://webkit.org/wpe/) backend
-(`wpe-display-headless`) would drop the Xvfb requirement entirely — it renders
-with no X or Wayland server, a better fit for containers and CI. The load and
-`evaluate_javascript` calls are identical; only the display/view setup differs.
+### WebKitGTK + Xvfb (fallback)
+
+```bash
+sudo apt install libwebkitgtk-6.0-dev xvfb
+
+zig build -Doptimize=ReleaseFast -Dwpe=false
+
+# GTK wants a display, so run under Xvfb:
+xvfb-run -a ./zig-out/bin/tezcatl https://example.com
+```
+
+Both backends share the same load / `evaluate_javascript` plumbing; only the
+display/view creation differs (`src/platform/linux.zig`, pruned at compile time
+by `-Dwpe`).
 
 ## Requirements
 

@@ -1,33 +1,43 @@
-// Linux backend for tezcatl, built on WebKitGTK 6.0 (the GTK4 WebKit port).
+// Linux backend for tezcatl, built on WebKit's GLib API.
 //
-// This mirrors the macOS/WKWebView backend: create an (offscreen) web view,
-// load a URL, pump a run loop until navigation finishes, optionally wait for
-// JS to settle, then evaluate JavaScript and return the string result.
+// Two display backends are selectable at build time (see build.zig, -Dwpe):
 //
-// Where macOS uses CFRunLoopRunInMode + an ObjC completion block, we use a
-// GLib GMainLoop + a GAsyncReadyCallback. Where macOS observes
-// WKNavigationDelegate, we connect to WebKitWebView's "load-changed" signal.
+//   * WPE WebKit + WPEPlatform headless display  (DEFAULT, -Dwpe=true)
+//       True headless: renders with no X server and no Wayland. Best fit for
+//       servers / containers / CI. Uses wpe_display_headless_new() and creates
+//       the view via g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", display, ...).
+//       pkg-config: wpe-webkit-2.0, wpe-platform-2.0.
 //
-// STATUS: experimental / unverified. This has not yet been compiled against
-// WebKitGTK on a real machine — treat it as a structurally-complete starting
-// point, not a finished port. render() and eval() are implemented;
-// screenshot/archive/pdf are stubbed pending a follow-up pass.
+//   * WebKitGTK 6.0 (GTK4)                        (-Dwpe=false)
+//       Same engine, but GTK wants a display, so headless runs go through Xvfb:
+//         xvfb-run -a ./zig-out/bin/tezcatl https://example.com
+//       pkg-config: webkitgtk-6.0, gtk4.
 //
-// Build deps (Debian/Ubuntu): libwebkitgtk-6.0-dev (pulls in gtk4, glib, jsc).
-// Headless run: WebKitGTK/GTK4 want a display, so run under Xvfb, e.g.
-//   xvfb-run -a ./zig-out/bin/tezcatl https://example.com
-// A future WPE-WebKit backend (wpe-display-headless) would drop the Xvfb
-// requirement entirely; see NOTES at the bottom of this file.
+// Everything after view creation is SHARED: both ports expose the identical
+// libwebkit GLib API (webkit_web_view_load_uri, the "load-changed" signal,
+// webkit_web_view_evaluate_javascript). Only createWebView() differs, and it is
+// pruned at compile time by the comptime `use_wpe` flag.
+//
+// This mirrors the macOS/WKWebView backend: load a URL, pump a run loop
+// (GLib GMainLoop here, CFRunLoop there) until navigation finishes, optionally
+// wait for JS to settle, then evaluate JavaScript and return the string result.
+//
+// STATUS: experimental / unverified. Not yet compiled/run against WebKit on a
+// real machine — treat as a structurally-complete starting point. The exact
+// WPE pkg-config module names and the wpe_display_headless_new() linkage are
+// the most likely things to need a small tweak per WPE version (see build.zig).
 
 const std = @import("std");
 const webview = @import("../webview.zig");
 
+// Build-time backend selection (default: WPE headless). See build.zig.
+const use_wpe = @import("build_options").use_wpe;
+
 // ---------------------------------------------------------------------------
-// GLib / GObject / GTK4 / WebKitGTK 6.0 externs
+// Shared GLib / GObject / WebKit GLib-API externs
 //
-// All GObject-derived pointers are opaque here; we only ever pass them back to
-// the C API, never dereference them from Zig. gboolean is a C int; gssize is
-// a C long (isize). NULL is represented as `null` on optional pointers.
+// All GObject-derived pointers are opaque; we only pass them back to the C API.
+// gboolean is a C int; gssize is isize; GType is gsize (usize). NULL = `null`.
 // ---------------------------------------------------------------------------
 
 const gpointer = ?*anyopaque;
@@ -35,15 +45,7 @@ const GAsyncReadyCallback = *const fn (source: gpointer, res: gpointer, user_dat
 const GSourceFunc = *const fn (user_data: gpointer) callconv(.c) c_int;
 const GCallback = *const fn () callconv(.c) void;
 
-// GTK4
-extern "c" fn gtk_init() void;
-extern "c" fn gtk_window_new() gpointer; // GtkWidget*
-extern "c" fn gtk_window_set_default_size(window: gpointer, width: c_int, height: c_int) void;
-extern "c" fn gtk_window_set_child(window: gpointer, child: gpointer) void;
-extern "c" fn gtk_window_present(window: gpointer) void;
-
-// WebKitGTK 6.0
-extern "c" fn webkit_web_view_new() gpointer; // GtkWidget* (a WebKitWebView)
+// WebKit GLib API — identical symbols on both the WPE and GTK ports.
 extern "c" fn webkit_web_view_load_uri(web_view: gpointer, uri: [*:0]const u8) void;
 extern "c" fn webkit_web_view_evaluate_javascript(
     web_view: gpointer,
@@ -61,10 +63,10 @@ extern "c" fn webkit_web_view_evaluate_javascript_finish(
     err_out: ?*gpointer, // GError**
 ) gpointer; // JSCValue* (NULL on error)
 
-// JavaScriptCore (jsc) value -> string
-extern "c" fn jsc_value_to_string(value: gpointer) ?[*:0]u8; // g_free the result
+// JavaScriptCore value -> string (g_free the result).
+extern "c" fn jsc_value_to_string(value: gpointer) ?[*:0]u8;
 
-// GLib main loop + timeouts + signals + memory
+// GLib main loop + timeouts + signals + memory.
 extern "c" fn g_main_loop_new(context: gpointer, is_running: c_int) gpointer;
 extern "c" fn g_main_loop_run(loop: gpointer) void;
 extern "c" fn g_main_loop_quit(loop: gpointer) void;
@@ -81,15 +83,33 @@ extern "c" fn g_signal_connect_data(
 ) c_ulong;
 extern "c" fn g_free(mem: gpointer) void;
 
-// WebKitLoadEvent enum values.
-const WEBKIT_LOAD_FINISHED: c_int = 3;
+// ---------------------------------------------------------------------------
+// WPE-only externs (referenced only when use_wpe == true; the comptime branch
+// prunes them out of the GTK build so their libraries aren't required there).
+// ---------------------------------------------------------------------------
+extern "c" fn wpe_display_headless_new() gpointer; // WPEDisplay*
+extern "c" fn webkit_web_view_get_type() usize; // GType (WEBKIT_TYPE_WEB_VIEW)
+// g_object_new is variadic: (GType, first_prop_name, value, ..., NULL).
+extern "c" fn g_object_new(object_type: usize, first_property_name: ?[*:0]const u8, ...) gpointer;
 
-// G_SOURCE_REMOVE / G_SOURCE_CONTINUE for GSourceFunc return values.
+// ---------------------------------------------------------------------------
+// GTK-only externs (referenced only when use_wpe == false).
+// ---------------------------------------------------------------------------
+extern "c" fn gtk_init() void;
+extern "c" fn gtk_window_new() gpointer; // GtkWidget*
+extern "c" fn gtk_window_set_default_size(window: gpointer, width: c_int, height: c_int) void;
+extern "c" fn gtk_window_set_child(window: gpointer, child: gpointer) void;
+extern "c" fn gtk_window_present(window: gpointer) void;
+extern "c" fn webkit_web_view_new() gpointer; // GtkWidget* (a WebKitWebView)
+
+// WebKitLoadEvent enum value.
+const WEBKIT_LOAD_FINISHED: c_int = 3;
+// GSourceFunc return: remove the source after it fires.
 const G_SOURCE_REMOVE: c_int = 0;
 
 // ---------------------------------------------------------------------------
 // Module-level state shared between callbacks (single-shot CLI: globals are OK,
-// matching the macOS backend's approach).
+// matching the macOS backend).
 // ---------------------------------------------------------------------------
 var gtk_initialized: bool = false;
 var main_loop: gpointer = null;
@@ -115,7 +135,7 @@ fn onLoadChanged(_web_view: gpointer, load_event: c_int, _user_data: gpointer) c
     }
 }
 
-// Navigation timeout GSourceFunc: fires if the page never finishes loading.
+// Navigation timeout: fires if the page never finishes loading.
 fn onNavTimeout(_user_data: gpointer) callconv(.c) c_int {
     _ = _user_data;
     if (!nav_finished) {
@@ -125,7 +145,8 @@ fn onNavTimeout(_user_data: gpointer) callconv(.c) c_int {
     return G_SOURCE_REMOVE;
 }
 
-// Generic "quit the loop" timeout, used for the post-load settle wait.
+// Generic "quit the loop" timeout, used for the post-load settle wait and as
+// the watchdog for the async JS evaluation.
 fn onWaitElapsed(_user_data: gpointer) callconv(.c) c_int {
     _ = _user_data;
     if (main_loop) |loop| g_main_loop_quit(loop);
@@ -160,26 +181,50 @@ fn onJsFinished(source: gpointer, res: gpointer, _user_data: gpointer) callconv(
 }
 
 // ---------------------------------------------------------------------------
-// Shared setup: init GTK, build view+window, load URL, wait for load to finish.
-// Returns the WebKitWebView* on success.
+// Backend-specific view creation (comptime-pruned).
+// Returns a WebKitWebView*. For WPE this also creates the headless display and
+// (implicitly) keeps it alive for process lifetime.
+// ---------------------------------------------------------------------------
+
+fn createWebView(width: u32, height: u32) webview.WebViewError!gpointer {
+    if (use_wpe) {
+        // WPEPlatform headless: no display server, no window, no Xvfb.
+        const display = wpe_display_headless_new();
+        if (display == null) return webview.WebViewError.FrameworkUnavailable;
+
+        // g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", display, NULL)
+        const gtype = webkit_web_view_get_type();
+        const web_view = g_object_new(gtype, "display", display, @as(gpointer, null));
+        if (web_view == null) return webview.WebViewError.FrameworkUnavailable;
+
+        _ = width;
+        _ = height;
+        return web_view;
+    } else {
+        // WebKitGTK: realize the view inside a presented top-level window.
+        // Under Xvfb nothing is shown on any real screen.
+        if (!gtk_initialized) {
+            gtk_init();
+            gtk_initialized = true;
+        }
+        const web_view = webkit_web_view_new();
+        if (web_view == null) return webview.WebViewError.FrameworkUnavailable;
+
+        const window = gtk_window_new();
+        if (window == null) return webview.WebViewError.FrameworkUnavailable;
+        gtk_window_set_default_size(window, @intCast(width), @intCast(height));
+        gtk_window_set_child(window, web_view);
+        gtk_window_present(window);
+        return web_view;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared setup: create the view, load the URL, wait for load to finish.
 // ---------------------------------------------------------------------------
 
 fn setup(url: []const u8, timeout_ms: u32, wait_ms: u32, width: u32, height: u32) webview.WebViewError!gpointer {
-    if (!gtk_initialized) {
-        gtk_init();
-        gtk_initialized = true;
-    }
-
-    const web_view = webkit_web_view_new();
-    if (web_view == null) return webview.WebViewError.FrameworkUnavailable;
-
-    // WebKitGTK renders inside a realized widget hierarchy. Under Xvfb a
-    // presented top-level window is enough; nothing is shown on a real screen.
-    const window = gtk_window_new();
-    if (window == null) return webview.WebViewError.FrameworkUnavailable;
-    gtk_window_set_default_size(window, @intCast(width), @intCast(height));
-    gtk_window_set_child(window, web_view);
-    gtk_window_present(window);
+    const web_view = try createWebView(width, height);
 
     // Observe load progress.
     _ = g_signal_connect_data(
@@ -208,7 +253,6 @@ fn setup(url: []const u8, timeout_ms: u32, wait_ms: u32, width: u32, height: u32
     // or timeout quits it.
     const nav_timeout_id = g_timeout_add(timeout_ms, &onNavTimeout, null);
     g_main_loop_run(main_loop);
-    // If navigation finished first, cancel the still-pending timeout source.
     if (nav_finished) _ = g_source_remove(nav_timeout_id);
 
     if (nav_timed_out and !nav_finished) return webview.WebViewError.Timeout;
@@ -287,10 +331,10 @@ pub fn eval(allocator: std.mem.Allocator, url: []const u8, js: []const u8, wait_
 }
 
 // --- Not yet ported to Linux -----------------------------------------------
-// screenshot -> webkit_web_view_snapshot() + GdkTexture/cairo PNG encode
-// pdf        -> webkit_print_operation_new() with a PDF GtkPrintSettings
-// archive    -> no WebKitGTK equivalent to .webarchive; would need a custom
-//               resource-collecting scheme. Likely stays macOS-only.
+// screenshot -> webkit_web_view_snapshot() + GdkTexture/cairo PNG encode (GTK),
+//               or a WPEView buffer grab (WPE)
+// pdf        -> webkit_print_operation_new() with a PDF print setting (GTK)
+// archive    -> no WebKit GLib equivalent to .webarchive; likely macOS-only.
 
 pub fn screenshot(allocator: std.mem.Allocator, url: []const u8, wait_ms: u32, timeout_ms: u32, width: u32, height: u32, eval_js: ?[]const u8) webview.WebViewError!webview.ScreenshotResult {
     _ = allocator;
@@ -326,21 +370,6 @@ fn teardown() void {
         g_main_loop_unref(loop);
         main_loop = null;
     }
-    // The GtkWindow owns the WebKitWebView; both are released when the process
-    // exits. A single-shot CLI intentionally leaks them rather than tearing
-    // down GTK, which keeps the run-loop bookkeeping simple.
+    // A single-shot CLI intentionally leaks the view/display/window rather than
+    // tearing down the toolkit, which keeps run-loop bookkeeping simple.
 }
-
-// ---------------------------------------------------------------------------
-// NOTES — path to a no-Xvfb headless backend (WPE WebKit)
-//
-// WebKitGTK needs a display, hence xvfb-run above. WPE WebKit's
-// wpe-display-headless backend renders with no X/Wayland server at all, which
-// is a better fit for containers/CI. The API shape is very similar:
-//   - WPEDisplay* display = wpe_display_headless_new();
-//   - WPEView*    view    = wpe_view_new(display);
-//   - WebKitWebView bound to that view via WebKitWebViewBackend
-//   - webkit_web_view_load_uri / evaluate_javascript are the SAME calls.
-// So this file could grow a compile-time switch (e.g. -Dwpe) selecting the WPE
-// display/view setup while sharing evalJS() and the load-changed plumbing.
-// ---------------------------------------------------------------------------
